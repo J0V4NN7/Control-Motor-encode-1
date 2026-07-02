@@ -1,0 +1,129 @@
+#include <PID_v1.h>
+
+// Definición de pines
+const int ENA = 11;
+const int IN1 = 9;
+const int IN2 = 10;
+const int ENCODER_A = 2; 
+const int ENCODER_B = 3;
+
+// Variables para el cálculo de RPM
+volatile long pulsos = 0;
+unsigned long ultimoTiempo = 0;
+const unsigned long intervalo = 100; // Muestreo de 100ms
+const float PULSOS_POR_REVOLUCION = 360.0; // AJUSTA AL DE TU MOTOR
+
+// Variables del sistema de control
+double velocidadReferencia = 0; 
+double velocidadReal = 0;       
+double velocidadFiltrada = 0;   
+double salidaPWM = 0;           
+bool motorActivo = false;
+bool direccionAdelante = true;  // Variable para controlar el sentido de giro
+
+// Sintonización del PID 
+double Kp = 1.0;  
+double Ki = 2.0;  
+double Kd = 0.0;  
+
+PID miPID(&velocidadFiltrada, &salidaPWM, &velocidadReferencia, Kp, Ki, Kd, DIRECT);
+
+void setup() {
+  Serial.begin(9600);
+  Serial.setTimeout(10);
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(ENCODER_A, INPUT_PULLUP);
+  pinMode(ENCODER_B, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A), registrarPulso, RISING);
+
+  miPID.SetOutputLimits(0, 255);
+  miPID.SetSampleTime(intervalo); 
+  miPID.SetMode(AUTOMATIC);
+
+  detenerMotorFisico();
+}
+
+void loop() {
+  // 1. LEER COMANDOS DE PYTHON
+  if (Serial.available() > 0) {
+    String comando = Serial.readStringUntil('\n');
+    comando.trim();
+
+    if (comando.startsWith("SET:")) {
+      double nuevaRef = comando.substring(4).toFloat();
+      if (nuevaRef >= 0 && nuevaRef <= 170.0) { // NUEVO LÍMITE: 170 RPM
+        velocidadReferencia = nuevaRef;
+        motorActivo = true;
+      }
+    } 
+    else if (comando.startsWith("DIR:")) {
+      int dir = comando.substring(4).toInt();
+      direccionAdelante = (dir == 1);
+    }
+    else if (comando == "STOP") {
+      detenerMotorFisico();
+    }
+  }
+
+  // 2. CÁLCULO DE RPM Y FILTRADO
+  unsigned long tiempoActual = millis();
+  if (tiempoActual - ultimoTiempo >= intervalo) {
+    
+    noInterrupts();
+    long pulsosActuales = pulsos;
+    pulsos = 0;
+    interrupts();
+
+    // Usamos abs() para que las RPM siempre sean positivas y el PID no falle en reversa
+    float tiempoEnMinutos = (tiempoActual - ultimoTiempo) / 60000.0;
+    velocidadReal = (abs(pulsosActuales) / PULSOS_POR_REVOLUCION) / tiempoEnMinutos;
+
+    // Filtro para suavizar la lectura
+    velocidadFiltrada = (0.7 * velocidadFiltrada) + (0.3 * velocidadReal);
+
+    // 3. CONTROL PID Y DIRECCIÓN
+    if (motorActivo && velocidadReferencia > 0) {
+      if (direccionAdelante) {
+        digitalWrite(IN1, HIGH);
+        digitalWrite(IN2, LOW);
+      } else {
+        digitalWrite(IN1, LOW);
+        digitalWrite(IN2, HIGH);
+      }
+      
+      miPID.Compute(); 
+      analogWrite(ENA, salidaPWM);
+    } else {
+      detenerMotorFisico();
+    }
+
+    // Enviar a Python
+    Serial.print(velocidadFiltrada);
+    Serial.print(",");
+    Serial.println(salidaPWM);
+
+    ultimoTiempo = tiempoActual;
+  }
+}
+
+void detenerMotorFisico() {
+  motorActivo = false;
+  velocidadReferencia = 0;
+  salidaPWM = 0;
+  velocidadFiltrada = 0;
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  analogWrite(ENA, 0);
+}
+
+void registrarPulso() {
+  if (digitalRead(ENCODER_B) == HIGH) {
+    pulsos++;
+  } else {
+    pulsos--;
+  }
+}
